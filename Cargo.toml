@@ -1,0 +1,3 @@
+[workspace]
+members = ["gader_agent", "gader_tui"]
+resolver = "2"
