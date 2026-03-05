@@ -15,10 +15,16 @@ use gader_agent::{
 use gader_common::{LogEntry, NetworkPacket};
 use quinn::{Endpoint, ServerConfig, TransportConfig};
 use tokio::sync::broadcast;
-use tokio_util::codec::{FramedRead, FramedWrite, length_delimited::LengthDelimitedCodec};
+use tokio_util::{
+    codec::{FramedRead, FramedWrite, length_delimited::LengthDelimitedCodec},
+    sync::CancellationToken,
+};
+use tracing::{debug, error, info};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
+
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
@@ -26,49 +32,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let docker_conn = Docker::connect_with_http("http://127.0.0.1:2375", 5, API_DEFAULT_VERSION)
         .expect("Unable to connect to docker");
 
-    // services to watch out for as of now
-    // immich and vaultwarden
-
-    // server endpoint for accepting connections
     let server_endpoint = get_connection_endpoint().context("Error in making endpoint")?;
-
-    println!("got here");
+    info!("got server connection endpoint");
 
     let (tx, _) = broadcast::channel::<LogEntry>(1000);
+    let c_token = CancellationToken::new();
 
-    // clones are cheap here
+    info!("spawning tasks for immich_server and vaultwarden containers");
+
     let tx_immich = tx.clone();
     let docker_immich = docker_conn.clone();
-
+    let c_im = c_token.clone();
     let _task_immich = tokio::spawn(async move {
         let immich_parser = immich::ImmichParser::new();
-
-        spawn_watcher(docker_immich, "immich_server", immich_parser, tx_immich).await;
+        spawn_watcher(
+            docker_immich,
+            "immich_server",
+            immich_parser,
+            tx_immich,
+            c_im,
+        )
+        .await;
     });
 
     let tx_vw = tx.clone();
     let docker_vw = docker_conn.clone();
-
+    let c_vw = c_token.clone();
     let _task_vw = tokio::spawn(async move {
         let vw_parser = vaultwarden::VWParser::new();
-        spawn_watcher(docker_vw, "vaultwarden", vw_parser, tx_vw).await;
+        spawn_watcher(docker_vw, "vaultwarden", vw_parser, tx_vw, c_vw).await;
     });
 
     let tx_ntwk = tx.clone();
-    tokio::spawn(async move {
-        println!("Awaiting connections");
-        while let Some(conn) = server_endpoint.accept().await {
-            println!("Accepting a client");
-            let tx_curr_client = tx_ntwk.clone();
+    let c_accept = c_token.clone();
 
+    tokio::spawn(async move {
+        info!("Awaiting connections");
+        while let Some(conn) = server_endpoint.accept().await {
+            info!("Accepting a client");
+            let tx_curr_client = tx_ntwk.clone();
+            let c_client = c_accept.clone();
             tokio::spawn(async move {
-                handle_client(conn, tx_curr_client).await;
+                handle_client(conn, tx_curr_client, c_client).await;
             });
         }
     });
 
     tokio::signal::ctrl_c().await?;
-    println!("Shutting down ...");
+    info!("SIGINT received, cancelling tasks...");
+
+    c_token.cancel();
+
+    // wait for remaining logs to flush
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     Ok(())
 }
@@ -76,21 +92,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn get_connection_endpoint() -> Result<Endpoint> {
     let (cert_chain, key_der) = cert::load_or_generate_keys();
 
-    // ServerConfig: common configuration for a set of server sessions
-
-    // we create a server configuration with a crypto provider
     let mut crypto = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(cert_chain, key_der)
         .context("failed to build TLS config")?;
 
-    // setup ALPN - application layer protocol negotiation
     crypto.alpn_protocols = vec![b"gader-v1".to_vec()];
 
-    // this returns an Arc<ServerConfig> .. can we use it directly?
     let quic_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(crypto)?;
 
-    // this would be local host?
     let socket_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 23456);
 
     let mut transport_config = TransportConfig::default();
@@ -100,7 +110,6 @@ fn get_connection_endpoint() -> Result<Endpoint> {
 
     quic_server_config.transport_config(Arc::new(transport_config));
 
-    // endpoint requires a Arc<dyn ServerConfig>, SocketAddr
     let server_endpoint = Endpoint::server(quic_server_config, socket_addr)?;
 
     Ok(server_endpoint)
@@ -111,8 +120,9 @@ async fn spawn_watcher<P: LogParser>(
     name: &str,
     parser: P,
     tx: broadcast::Sender<LogEntry>,
+    c_token: CancellationToken,
 ) {
-    println!("Watching: {}", name);
+    info!("Watching: {}", name);
     let params = LogsOptionsBuilder::new()
         .follow(true)
         .stderr(true)
@@ -123,37 +133,63 @@ async fn spawn_watcher<P: LogParser>(
     let mut stream = docker.logs(name, Some(params));
 
     while let Some(Ok(log)) = stream.next().await {
-        //println!("{:?}", log);
+        debug!("{:?}", log);
 
         if let Some(entry) = parser.parse(&log.to_string()) {
-            // println!("{:?}", entry);
-            //println!("Receiving logs!"); // getting till here -- logs show up properly
+            debug!("Receiving logs!");
             let _ = tx.send(entry);
+        }
+    }
+
+    loop {
+        tokio::select! {
+            recv_stream = stream.next() => {
+                match recv_stream {
+                    Some(Ok(log)) => {
+                        debug!("{:?}", log);
+
+                        if let Some(entry) = parser.parse(&log.to_string()) {
+                            debug!("Receiving logs!");
+                            let _ = tx.send(entry);
+                        }
+                    }
+                    Some(Err(e)) => error!("Docker stream error: {}", e),
+                    _ => {}
+                }
+            }
+            _ = c_token.cancelled() => {
+                debug!("Watcher {} received cancel signal", name);
+                break;
+            }
         }
     }
 }
 
-async fn handle_client(conn: quinn::Incoming, tx: broadcast::Sender<LogEntry>) {
-    println!("got here");
-
+async fn handle_client(
+    conn: quinn::Incoming,
+    tx: broadcast::Sender<LogEntry>,
+    c_token: CancellationToken,
+) {
     let connection = match conn.await {
-        Ok(c) => c,
+        Ok(c) => {
+            debug!("handshake successfull");
+            c
+        }
         Err(e) => {
-            eprintln!("Handshake failed: {}", e);
+            error!("Handshake failed: {}", e);
             return;
         }
     };
 
-    println!("Client connected: {}", connection.remote_address());
+    info!("Client connected: {}", connection.remote_address());
 
     let (send_stream, recv_stream) = match connection.accept_bi().await {
         Ok(s) => {
-            // unable to get to this point
-            println!("Received bi-stream: {:#?}", s);
+            info!("Received bi-stream");
             s
         }
         Err(e) => {
-            eprintln!("Failed to accept bi-stream: {}", e);
+            error!("Failed to accept bi-stream: {}", e);
             return;
         }
     };
@@ -162,29 +198,14 @@ async fn handle_client(conn: quinn::Incoming, tx: broadcast::Sender<LogEntry>) {
     let mut reader = FramedRead::new(recv_stream, LengthDelimitedCodec::new());
 
     let mut rx = tx.subscribe();
-    // we have to subscribe to the broadcast channel
     let mut batch: Vec<LogEntry> = Vec::with_capacity(10);
 
-    // upgrade this an enum later on
-    // to filter on different log levels and services or timestamps etc.
-    // default is everything
     let mut filter: Option<String> = None;
-
     let mut flush_timer = tokio::time::interval(tokio::time::Duration::from_millis(500));
-
-    println!("Got here!");
 
     loop {
         tokio::select! {
-
-            // TODO: add proper filter support later on
-
-            // sending stuff
             msg = rx.recv() => {
-
-                // run it if we receive something in the broadcast channel
-                println!("inside rx.recv()");
-
                 match msg {
                     Ok(entry) => {
                         if let Some(ref svc) = filter
@@ -194,12 +215,11 @@ async fn handle_client(conn: quinn::Incoming, tx: broadcast::Sender<LogEntry>) {
 
                         batch.push(entry);
 
-                        // make the max batch length configurable later on
                         if batch.len() >= 10 {
                             let batch_to_send = std::mem::take(&mut batch);
                             let packet = NetworkPacket::Batch(batch_to_send);
 
-                            println!("Sending packet: {:#?}", packet);
+                            debug!("Sending packet: {:#?}", packet);
 
                             if let Ok(data) = postcard::to_stdvec(&packet)
                                 && writer.send(Bytes::from(data)).await.is_err() {
@@ -208,14 +228,12 @@ async fn handle_client(conn: quinn::Incoming, tx: broadcast::Sender<LogEntry>) {
                         }
                     }
                     Err(e) => {
-                        println!("Encountered Error: {:?}", e);
+                        error!("Encountered Error: {:?}", e);
                     }
                 }
             }
 
-            // recv stuff from the client
             packet_res = reader.next() => {
-
                 match packet_res {
                     Some(Ok(bytes)) => {
                         if let Ok(packet) = postcard::from_bytes::<NetworkPacket>(&bytes)
@@ -223,16 +241,21 @@ async fn handle_client(conn: quinn::Incoming, tx: broadcast::Sender<LogEntry>) {
                                     service,
                                     ..
                                 } = packet {
-                                println!("Updating filter to: {:?}", service);
+                                info!("Updating filter to: {:?}", service);
                                 filter = service;
                             }
                     }
                     Some(Err(e)) => {
-                        eprintln!("Framing Error: {}", e);
+                        error!("Framing Error: {}", e);
                         break;
                     }
                     None => break,
                 }
+            }
+
+            _ = c_token.cancelled() => {
+                info!("Client handler shutting down -- received cancel signal");
+                break;
             }
 
             _ = flush_timer.tick() => {
@@ -241,7 +264,7 @@ async fn handle_client(conn: quinn::Incoming, tx: broadcast::Sender<LogEntry>) {
 
                     let batch_to_send = std::mem::take(&mut batch);
                     let packet = NetworkPacket::Batch(batch_to_send);
-                    println!("Sending packet: {:#?}", packet);
+                    debug!("Sending packet: {:#?}", packet);
                     if let Ok(data) = postcard::to_stdvec(&packet)
                         && writer.send(Bytes::from(data)).await.is_err() {
                             break;
@@ -251,5 +274,5 @@ async fn handle_client(conn: quinn::Incoming, tx: broadcast::Sender<LogEntry>) {
         }
     }
 
-    println!("Client disconnected!");
+    info!("Client disconnected!");
 }
