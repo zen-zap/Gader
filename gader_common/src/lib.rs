@@ -41,7 +41,5 @@ pub enum NetworkPacket {
     Batch(Vec<LogEntry>),
     UpdateFilter {
         service: Option<String>,
-        level: Option<String>,
     },
-    KeepAlive,
 }

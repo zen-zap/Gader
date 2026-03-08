@@ -104,6 +104,12 @@ async fn main() -> Result<()> {
                 }
             }
         }
+
+        for packet in app.outbox.drain(..) {
+            if let Ok(data) = postcard::to_stdvec(&packet) {
+                writer.send(Bytes::from(data)).await.ok();
+            }
+        }
     }
 
     tui::restore_terminal()?;

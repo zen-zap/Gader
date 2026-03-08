@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
 };
 
-use crate::app::{App, View};
+use crate::app::{App, LEVELS, View};
 
 fn level_style(level: &str) -> Style {
     match level {
@@ -36,16 +36,21 @@ pub fn view(f: &mut Frame, app: &mut App) {
 }
 
 fn render_table(f: &mut Frame, app: &mut App) {
+    let has_search = app.searching || !app.search_query.is_empty();
+
+    let mut constraints = vec![Constraint::Length(3), Constraint::Min(1)];
+    if has_search {
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.push(Constraint::Length(1));
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
+        .constraints(constraints)
         .split(f.area());
 
-    let filter_name = app.filter_name().to_owned();
+    let service_name = app.filter_name().to_owned();
+    let level_name = LEVELS[app.active_level];
     let follow = app.follow;
     let total_count = app.logs.len();
 
@@ -69,7 +74,7 @@ fn render_table(f: &mut Frame, app: &mut App) {
 
     let follow_indicator = if follow { " [LIVE]" } else { "" };
     let header_text = format!(
-        " Gader | {visible_count}/{total_count} logs | Filter: {filter_name}{follow_indicator} ",
+        " Gader | {visible_count}/{total_count} | Svc: {service_name} | Lvl: {level_name}{follow_indicator} ",
     );
     let header = Paragraph::new(header_text)
         .block(Block::default().borders(Borders::ALL).title(" Status "))
@@ -121,10 +126,32 @@ fn render_table(f: &mut Frame, app: &mut App) {
 
     f.render_stateful_widget(table, chunks[1], &mut app.table_state);
 
-    let footer =
-        Paragraph::new("q: Quit | ↑↓/Scroll: Navigate | Space: Latest | Tab: Filter | e: Expand")
-            .style(Style::default().fg(Color::DarkGray));
-    f.render_widget(footer, chunks[2]);
+    let (search_chunk, footer_chunk) = if has_search { (Some(2usize), 3usize) } else { (None, 2) };
+
+    if let Some(idx) = search_chunk {
+        let (text, style) = if app.searching {
+            (
+                format!(" / {}█", app.search_query),
+                Style::default().fg(Color::Yellow),
+            )
+        } else {
+            (
+                format!(" / {}  (Esc: clear)", app.search_query),
+                Style::default().fg(Color::DarkGray),
+            )
+        };
+        f.render_widget(Paragraph::new(text).style(style), chunks[idx]);
+    }
+
+    let footer_text = if app.searching {
+        "Esc/Enter: Close search | Backspace: Delete | ↑↓: Navigate results"
+    } else {
+        "q: Quit | ↑↓/Scroll: Navigate | Space: Latest | Tab: Service | l: Level | s: Search | e: Expand"
+    };
+    f.render_widget(
+        Paragraph::new(footer_text).style(Style::default().fg(Color::DarkGray)),
+        chunks[footer_chunk],
+    );
 }
 
 fn render_detail(f: &mut Frame, app: &App) {

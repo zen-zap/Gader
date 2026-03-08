@@ -226,7 +226,11 @@ async fn handle_client(
     match handshake_res {
         Ok(Some(Ok(bytes))) => match postcard::from_bytes::<NetworkPacket>(&bytes) {
             Ok(NetworkPacket::Handshake { secret_token }) => {
-                if secret_token.as_bytes().ct_eq(state.secret.as_bytes()).into() {
+                if secret_token
+                    .as_bytes()
+                    .ct_eq(state.secret.as_bytes())
+                    .into()
+                {
                     info!("Handshake successful for {}", connection.remote_address());
                     let ack = NetworkPacket::HandshakeAck { accepted: true };
                     if let Ok(data) = postcard::to_stdvec(&ack) {
@@ -313,12 +317,10 @@ async fn handle_client(
                 match packet_res {
                     Some(Ok(bytes)) => {
                         if let Ok(packet) = postcard::from_bytes::<NetworkPacket>(&bytes)
-                            && let NetworkPacket::UpdateFilter {
-                                    service,
-                                    ..
-                                } = packet {
+                            && let NetworkPacket::UpdateFilter { service } = packet {
                                 info!("Updating filter to: {:?}", service);
                                 filter = service;
+                                batch.clear();
                             }
                     }
                     Some(Err(e)) => {
