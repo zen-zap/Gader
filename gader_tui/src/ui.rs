@@ -58,6 +58,7 @@ fn render_table(f: &mut Frame, app: &mut App) {
                 Row::new(vec![
                     Cell::from(format!("{arrival}")),
                     Cell::from(log.timestamp.to_string()),
+                    Cell::from(log.service.to_string()).style(Style::default().fg(Color::Magenta)),
                     Cell::from(log.level.to_string()).style(level_style(&log.level)),
                     Cell::from(truncate(&log.message, 80)),
                 ])
@@ -74,7 +75,7 @@ fn render_table(f: &mut Frame, app: &mut App) {
         .block(Block::default().borders(Borders::ALL).title(" Status "))
         .style(Style::default().fg(Color::Cyan));
     f.render_widget(header, chunks[0]);
-    
+
     let col_header = Row::new(vec![
         Cell::from("  #").style(
             Style::default()
@@ -82,6 +83,11 @@ fn render_table(f: &mut Frame, app: &mut App) {
                 .add_modifier(Modifier::BOLD),
         ),
         Cell::from("Timestamp").style(
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Service").style(
             Style::default()
                 .fg(Color::Gray)
                 .add_modifier(Modifier::BOLD),
@@ -103,6 +109,7 @@ fn render_table(f: &mut Frame, app: &mut App) {
         [
             Constraint::Length(6),
             Constraint::Length(26),
+            Constraint::Length(12),
             Constraint::Length(7),
             Constraint::Min(10),
         ],
@@ -114,10 +121,9 @@ fn render_table(f: &mut Frame, app: &mut App) {
 
     f.render_stateful_widget(table, chunks[1], &mut app.table_state);
 
-    let footer = Paragraph::new(
-        "q: Quit | ↑↓/Scroll: Navigate | Space: Latest | Tab: Filter | e: Expand",
-    )
-    .style(Style::default().fg(Color::DarkGray));
+    let footer =
+        Paragraph::new("q: Quit | ↑↓/Scroll: Navigate | Space: Latest | Tab: Filter | e: Expand")
+            .style(Style::default().fg(Color::DarkGray));
     f.render_widget(footer, chunks[2]);
 }
 
