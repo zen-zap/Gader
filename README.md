@@ -15,6 +15,11 @@ A lightweight terminal log viewer for Docker containers. The agent runs on your
 server beside the Docker daemon and streams parsed, structured logs over QUIC to
 a TUI client on your machine.
 
+<img width="1920" height="1031" alt="image" src="../gader/assets/demo_1.png" />
+
+
+
+### Simplified Architecture:
 ```
   ┌──────────────────────────┐                  ┌──────────────────┐
   │  Docker                  │                  │                  │
