@@ -12,6 +12,8 @@ fn cert_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// If a certificate exists, we use that else we generate a new one
+/// certificate pinning is done on the client side
 pub fn load_or_generate_keys() -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
     let dir = cert_dir()?;
     let cert_path = dir.join("server.cert");
